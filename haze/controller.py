@@ -144,6 +144,21 @@ class Controller:
             return None
         return self.active_playlist.tracks[self._current_index()]
 
+    # expose internal state for consumers such as the web UI
+    @property
+    def shuffle(self) -> bool:
+        """Whether shuffle mode is currently enabled."""
+        return self._shuffle
+
+    @property
+    def pending_playlist(self) -> Optional[Playlist]:
+        """Playlist that has been queued for activation after the current track.
+
+        Matches ``_pending_playlist`` but provides a read‑only public accessor for
+        external users (web/UI, tests, etc.).
+        """
+        return self._pending_playlist
+
     def _current_index(self) -> int:
         if not self.active_playlist:
             return 0

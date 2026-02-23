@@ -2,14 +2,14 @@ playout:
   sample_rate: 48000
   channels: 2
   default_playlist: null
-  shuffle: false
+  shuffle: true
   shuffle_carry_over: 3
 
 outputs:
   udp:
     enabled: false
-    host: "127.0.0.1"
-    port: 1234
+    host: "239.10.50.1"
+    port: 3800
     bitrate: "192k"
     codec: aac
     format: mpegts

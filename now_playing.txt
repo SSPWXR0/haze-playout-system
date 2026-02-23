@@ -1,8 +1,0 @@
-title=Wine Cooler
-artist=Network Music Ensemble
-album=Leisure
-year=2016
-duration=180.5735
-playlist=Default
-file=/home/rai/Documents/dev/haze-playout-system/Managed/Playlists/Wine Cooler.opus
-timestamp=2026-02-23T15:18:25.829691
