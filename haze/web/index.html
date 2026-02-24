@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Haze Playout System</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+<style>
+  :root {
+    --text: #f0f0f2;
+    --text-mid: #a1a1aa;
+    --text-dim: #71717a;
+    --accent: #ffffff;
+    --bg-glass: rgba(16, 20, 26, 0.85);
+    --border-glass: rgba(255, 255, 255, 0.08);
+  }
+  
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  
+  body {
+    background: #000000; 
+    color: var(--text);
+    font-family: 'Geist', sans-serif;
+    padding: 24px; 
+    -webkit-font-smoothing: antialiased;
+  }
+
+  #bug {
+    display: inline-flex;
+    flex-direction: column;
+    width: 500px;
+    padding: 20px;
+    background: var(--bg-glass);
+    backdrop-filter: blur(24px);
+    -webkit-backdrop-filter: blur(24px);
+    border: 1px solid var(--border-glass);
+    border-radius: 16px;
+    box-shadow: 0 20px 40px rgba(0,0,0,0.6);
+    opacity: 0;
+    transform: translateY(10px);
+    transition: opacity 0.4s ease, transform 0.4s ease;
+  }
+
+  #bug.live {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  .top-row {
+    display: flex;
+    gap: 20px;
+    align-items: center;
+    margin-bottom: 20px;
+  }
+
+  .art-wrap {
+    width: 120px;
+    height: 120px;
+    border-radius: 8px;
+    overflow: hidden;
+    flex-shrink: 0;
+    background: rgba(255, 255, 255, 0.05);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  }
+
+  .art-wrap img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+
+  .info-wrap {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 4px;
+  }
+
+  .track-title {
+    font-size: 24px;
+    font-weight: 600;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    line-height: 1.2;
+    transition: opacity 0.25s ease;
+  }
+
+  .track-artist {
+    font-size: 20px;
+    font-weight: 500;
+    color: var(--text-mid);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    transition: opacity 0.25s ease;
+  }
+
+  .track-album {
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--text-dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-top: 4px;
+    transition: opacity 0.25s ease;
+  }
+
+  .fade { opacity: 0; }
+
+  .progress-section {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .timecodes {
+    display: flex;
+    justify-content: space-between;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-mid);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .progress-bar {
+    width: 100%;
+    height: 4px;
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 99px;
+    overflow: hidden;
+  }
+
+  .progress-fill {
+    height: 100%;
+    background: var(--accent);
+    width: 0%;
+    transition: width 0.5s linear;
+  }
+</style>
+</head>
+<body>
+
+<div id="bug">
+  <div class="top-row">
+    <div class="art-wrap">
+      <img id="album-art" src="/art" alt="" style="display:none">
+    </div>
+    
+    <div class="info-wrap">
+      <div class="track-title" id="track-title">—</div>
+      <div class="track-artist" id="track-artist">—</div>
+      <div class="track-album" id="track-album">—</div>
+    </div>
+  </div>
+
+  <div class="progress-section">
+    <div class="timecodes">
+      <span id="elapsed">0:00</span>
+      <span id="duration">0:00</span>
+    </div>
+    <div class="progress-bar">
+      <div class="progress-fill" id="progress-fill"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+let progressTimer = null;
+let trackStart = null;
+const socket = io();
+
+function formatTime(seconds) {
+  if (!seconds || isNaN(seconds)) return "0:00";
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  if (h > 0) {
+    return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+  }
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+socket.on("track_change", data => { 
+  trackStart = Date.now(); 
+  crossfade(data); 
+});
+
+socket.on("state", data => apply(data));
+
+function crossfade(data) {
+  const titleEl = document.getElementById("track-title");
+  const artistEl = document.getElementById("track-artist");
+  const albumEl = document.getElementById("track-album");
+  
+  titleEl.classList.add("fade");
+  artistEl.classList.add("fade");
+  albumEl.classList.add("fade");
+  
+  setTimeout(() => { 
+    apply(data); 
+    titleEl.classList.remove("fade"); 
+    artistEl.classList.remove("fade");
+    albumEl.classList.remove("fade");
+  }, 250);
+}
+
+function apply(data) {
+  const t = data.track || {};
+  const isPlaying = data.state === "PLAYING";
+  const bugEl = document.getElementById("bug");
+
+  if (isPlaying) {
+    bugEl.classList.add("live");
+  } else {
+    bugEl.classList.remove("live");
+  }
+
+  document.getElementById("track-title").textContent = t.title || "Unknown Title";
+  document.getElementById("track-artist").textContent = t.artist || "Unknown Artist";
+
+  let albumText = t.album || "Unknown Album";
+  if (t.year) {
+    albumText += ` (${t.year})`;
+  }
+  document.getElementById("track-album").textContent = albumText;
+
+  const art = document.getElementById("album-art");
+  if (t.has_art) {
+    art.src = `/art?t=${Date.now()}`; 
+    art.style.display = "block";
+  } else { 
+    art.style.display = "none"; 
+  }
+
+  document.getElementById("duration").textContent = formatTime(t.duration);
+  
+  stopProgress();
+  if (isPlaying) {
+    startProgress(t.duration);
+  }
+}
+
+function startProgress(dur) {
+  if (!trackStart) trackStart = Date.now();
+  
+  progressTimer = setInterval(() => {
+    const elapsedSecs = (Date.now() - trackStart) / 1000;
+
+    document.getElementById("elapsed").textContent = formatTime(elapsedSecs);
+
+    if (dur && dur > 0) {
+      const percentage = Math.min(100, (elapsedSecs / dur) * 100);
+      document.getElementById("progress-fill").style.width = percentage + "%";
+    } else {
+      document.getElementById("progress-fill").style.width = "0%";
+    }
+  }, 500);
+}
+
+function stopProgress() { 
+  if (progressTimer) { 
+    clearInterval(progressTimer); 
+    progressTimer = null; 
+  } 
+}
+</script>
+</body>
+</html>

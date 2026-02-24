@@ -55,11 +55,16 @@ class Controller:
 
         self._webserver: Optional[WebServer] = None
         self._meta_injector: Optional[MetadataInjector] = None
+        self._tui: Optional[object] = None
 
         self._lock = threading.Lock()
 
     def set_webserver(self, ws: WebServer):
         self._webserver = ws
+
+    def set_tui(self, tui: object):
+        self._tui = tui
+
 
     def load_playlists(self):
         self.playlists = discover(self.cfg)
@@ -144,21 +149,6 @@ class Controller:
             return None
         return self.active_playlist.tracks[self._current_index()]
 
-    # expose internal state for consumers such as the web UI
-    @property
-    def shuffle(self) -> bool:
-        """Whether shuffle mode is currently enabled."""
-        return self._shuffle
-
-    @property
-    def pending_playlist(self) -> Optional[Playlist]:
-        """Playlist that has been queued for activation after the current track.
-
-        Matches ``_pending_playlist`` but provides a read‑only public accessor for
-        external users (web/UI, tests, etc.).
-        """
-        return self._pending_playlist
-
     def _current_index(self) -> int:
         if not self.active_playlist:
             return 0
@@ -228,6 +218,9 @@ class Controller:
 
         if self._webserver:
             self._webserver.broadcast_track_change()
+
+        if self._tui and hasattr(self._tui, "notify_track_start"):
+            self._tui.notify_track_start()
 
         log.info(f"Playing: {track}")
 

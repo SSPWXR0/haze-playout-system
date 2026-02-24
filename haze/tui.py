@@ -1,210 +1,326 @@
 from __future__ import annotations
 
-import curses
+import os
+import sys
 import threading
 import time
 import logging
 from typing import TYPE_CHECKING
 
-from .controller import State
-
 if TYPE_CHECKING:
     from .controller import Controller
 
+from .controller import State
+
 log = logging.getLogger(__name__)
 
-KEYBINDINGS = [
-    ("SPACE",  "Play / Pause"),
-    ("→ / n",  "Next track"),
-    ("← / p",  "Prev track"),
-    ("↑ / ↓",  "Select playlist"),
-    ("ENTER",  "Switch to selected"),
-    ("s",      "Toggle shuffle"),
-    ("r",      "Reload playlists"),
-    ("q",      "Quit"),
-]
+_USE_CURSES = sys.platform != "win32"
+
+
+def _fmt_time(secs: float | None) -> str:
+    if secs is None:
+        return "--:--"
+    secs = int(secs)
+    return f"{secs // 60}:{secs % 60:02d}"
+
+
+def _trunc(s: str, n: int) -> str:
+    s = s or ""
+    return s if len(s) <= n else s[:max(0, n - 1)] + "…"
+
+
+def _rjust_pair(left: str, right: str, width: int) -> str:
+    gap = width - len(left) - len(right)
+    return left + " " * max(1, gap) + right
+
+
+def _progress_bar(elapsed: float, total: float | None, width: int) -> str:
+    time_str = f"  {_fmt_time(elapsed)} / {_fmt_time(total)}  "
+    inner = width - 2 - len(time_str)
+    if inner < 4:
+        return f"[{time_str.strip()}]"
+    filled = int(inner * min(elapsed, total) / total) if (total and total > 0) else 0
+    return "[" + "=" * filled + " " * (inner - filled) + time_str + "]"
+
+
+def _cols() -> int:
+    try:
+        return os.get_terminal_size().columns
+    except Exception:
+        return 80
+
+
+HELP = "[ 1 ] PLAY  [ 2 ] PAUSE  [ 3 ] STOP  [ 4 ] NEXT  [ 5 ] PREV  [ 6 ] SHUFFLE  [ 7 ] RELOAD  [ Q ] QUIT"
+DIV = "─"
+
+
+def _handle_key(ch: str, controller) -> bool:
+    c = controller
+    ch = ch.lower()
+    if ch in ("q", "\x03", "\x1b"):
+        c.stop()
+        return False
+    elif ch == "1":
+        if c.state == State.PAUSED:
+            c.resume()
+    elif ch == "2":
+        c.pause()
+    elif ch == "3":
+        c.stop()
+    elif ch == "4":
+        c.next_track()
+    elif ch == "5":
+        c.prev_track()
+    elif ch == "6":
+        c.toggle_shuffle()
+    elif ch == "7":
+        c.reload_playlists()
+    return True
 
 
 class TUI:
     def __init__(self, controller: Controller):
         self.controller = controller
-        self._selected: int = 0
         self._running = False
+        self._elapsed: float = 0.0
+        self._track_start: float | None = None
+
+    def notify_track_start(self):
+        self._track_start = time.monotonic()
+        self._elapsed = 0.0
 
     def run(self):
-        curses.wrapper(self._main)
-
-    def _main(self, stdscr: curses.window):
         self._running = True
-        curses.curs_set(0)
-        curses.start_color()
-        curses.use_default_colors()
-        curses.init_pair(1, curses.COLOR_CYAN,    -1)
-        curses.init_pair(2, curses.COLOR_GREEN,   -1)
-        curses.init_pair(3, curses.COLOR_YELLOW,  -1)
-        curses.init_pair(4, curses.COLOR_MAGENTA, -1)
-        curses.init_pair(5, curses.COLOR_WHITE,   -1)
-        curses.init_pair(6, curses.COLOR_BLACK,   curses.COLOR_CYAN)
+        if _USE_CURSES:
+            self._run_curses()
+        else:
+            self._run_windows()
 
-        stdscr.nodelay(True)
-        stdscr.keypad(True)
+    # ------------------------------------------------------------------ #
+    #  Curses backend (Unix)                                               #
+    # ------------------------------------------------------------------ #
 
-        threading.Thread(target=self._refresh_loop, args=(stdscr,), daemon=True).start()
+    def _run_curses(self):
+        import curses
 
-        while self._running:
-            try:
+        def _main(stdscr):
+            curses.curs_set(0)
+            curses.start_color()
+            curses.use_default_colors()
+            curses.init_pair(1, curses.COLOR_CYAN,    -1)
+            curses.init_pair(2, curses.COLOR_GREEN,   -1)
+            curses.init_pair(3, curses.COLOR_YELLOW,  -1)
+            curses.init_pair(4, curses.COLOR_MAGENTA, -1)
+            curses.init_pair(5, curses.COLOR_WHITE,   -1)
+            stdscr.nodelay(False)
+            stdscr.timeout(500)
+            stdscr.keypad(True)
+
+            while self._running:
+                self._update_elapsed()
+                self._curses_draw(stdscr)
+
                 key = stdscr.getch()
-            except Exception:
-                key = -1
-            if key == -1:
-                time.sleep(0.05)
-                continue
-            self._handle_key(key)
+                if key == -1:
+                    continue
+                try:
+                    ch = chr(key)
+                except (ValueError, OverflowError):
+                    continue
+                if not _handle_key(ch, self.controller):
+                    self._running = False
+                    break
 
-    def _handle_key(self, key: int):
-        c = self.controller
-        names = list(c.playlists.keys())
+        curses.wrapper(_main)
 
-        if key in (ord("q"), ord("Q")):
-            self._running = False
-            c.stop()
-        elif key == ord(" "):
-            if c.state == State.PAUSED:
-                c.resume()
-            else:
-                c.pause()
-        elif key in (curses.KEY_RIGHT, ord("n"), ord("N")):
-            c.next_track()
-        elif key in (curses.KEY_LEFT, ord("p"), ord("P")):
-            c.prev_track()
-        elif key == curses.KEY_UP:
-            self._selected = max(0, self._selected - 1)
-        elif key == curses.KEY_DOWN:
-            self._selected = min(len(names) - 1, self._selected + 1)
-        elif key in (curses.KEY_ENTER, 10, 13):
-            if names:
-                c.switch_to(names[self._selected])
-        elif key in (ord("s"), ord("S")):
-            c.toggle_shuffle()
-        elif key in (ord("r"), ord("R")):
-            c.reload_playlists()
-            self._selected = 0
+    def _update_elapsed(self):
+        state = self.controller.state
+        if self._track_start and state == State.PLAYING:
+            self._elapsed = time.monotonic() - self._track_start
+        elif state == State.STOPPED:
+            self._elapsed = 0.0
 
-    def _refresh_loop(self, stdscr: curses.window):
-        while self._running:
-            try:
-                self._draw(stdscr)
-            except Exception:
-                pass
-            time.sleep(0.25)
-
-    def _draw(self, scr: curses.window):
+    def _curses_draw(self, scr):
+        import curses
         scr.erase()
         h, w = scr.getmaxyx()
-        self._draw_header(scr, w)
-        self._draw_now_playing(scr, w, y=2)
-        self._draw_playlists(scr, w, y_start=9, max_rows=h - len(KEYBINDINGS) - 11)
-        self._draw_keybindings(scr, w, h)
-        scr.refresh()
-
-    def _draw_header(self, scr: curses.window, w: int):
-        scr.attron(curses.color_pair(1) | curses.A_BOLD)
-        scr.addstr(0, 0, " ▶  HAZE PLAYOUT ".center(w)[:w])
-        scr.attroff(curses.color_pair(1) | curses.A_BOLD)
-
-    def _draw_now_playing(self, scr: curses.window, w: int, y: int):
         c = self.controller
         meta = c.current_meta
         track = c.current_track
+        state = c.state
+
+        title  = meta.title  or (track.path.stem if track else "—")
+        artist = meta.artist or "—"
+        album  = meta.album  or "—"
+        year   = f" ({meta.year})" if meta.year else ""
+        dur    = meta.duration or (track.duration if track else None)
+        codec  = track.path.suffix.lstrip(".").upper() if track else ""
 
         state_label = {
-            State.PLAYING: "▶ PLAYING",
-            State.PAUSED:  "⏸ PAUSED",
-            State.STOPPED: "⏹ STOPPED",
-        }.get(c.state, "")
+            State.PLAYING: "▶  PLAYING",
+            State.PAUSED:  "⏸  PAUSED",
+            State.STOPPED: "⏹  STOPPED",
+        }.get(state, "")
+        shuffle_str = "  [SHUFFLE ON]" if c._shuffle else ""
+        web_str = ""
+        if c.cfg.web.enabled:
+            host = "localhost" if c.cfg.web.host in ("0.0.0.0", "") else c.cfg.web.host
+            web_str = f"  │  http://{host}:{c.cfg.web.port}"
 
-        pl_name = c.active_playlist.name if c.active_playlist else "—"
-        shuffle_tag = "  [SHUFFLE]" if c._shuffle else ""
-        pending_tag = f"  ↷ {c._pending_playlist.name}" if c._pending_playlist else ""
+        def put(y, x, text, attr=0):
+            if y >= h - 1:
+                return
+            try:
+                scr.addnstr(y, x, str(text), max(0, w - x - 1), attr)
+            except curses.error:
+                pass
 
-        scr.attron(curses.color_pair(3))
-        scr.addstr(y, 2, f"{state_label}  │  {pl_name}{shuffle_tag}{pending_tag}"[:w - 3])
-        scr.attroff(curses.color_pair(3))
+        def div(y):
+            if y >= h - 1:
+                return
+            try:
+                scr.addnstr(y, 0, DIV * w, w, curses.color_pair(5))
+            except curses.error:
+                pass
 
-        title = meta.title or (track.path.stem if track else "—")
-        scr.attron(curses.color_pair(2) | curses.A_BOLD)
-        scr.addstr(y + 1, 2, f"♪  {title}"[:w - 3])
-        scr.attroff(curses.color_pair(2) | curses.A_BOLD)
+        row = 0
+        div(row); row += 1
+        put(row, 0, f"  HAZE PLAYOUT  ·  {state_label}{shuffle_str}{web_str}",
+            curses.color_pair(1) | curses.A_BOLD); row += 1
+        div(row); row += 1
+        put(row, 0, "  " + HELP, curses.color_pair(5)); row += 1
+        div(row); row += 1
+        row += 1
 
-        if meta.artist:
-            scr.attron(curses.color_pair(5))
-            scr.addstr(y + 2, 4, f"{meta.artist}"[:w - 5])
-            scr.attroff(curses.color_pair(5))
+        put(row, 0, "  NOW PLAYING", curses.color_pair(3) | curses.A_BOLD); row += 1
+        row += 1
 
-        if meta.album:
-            year_str = f" ({meta.year})" if meta.year else ""
-            scr.attron(curses.color_pair(4))
-            scr.addstr(y + 3, 4, f"{meta.album}{year_str}"[:w - 5])
-            scr.attroff(curses.color_pair(4))
+        title_line = f"  {_trunc(title, w - 12)}"
+        put(row, 0, _rjust_pair(title_line, f"{codec}  ", w),
+            curses.color_pair(2) | curses.A_BOLD); row += 1
+        put(row, 2, _trunc(artist, w - 4), curses.color_pair(5)); row += 1
+        put(row, 2, _trunc(album + year, w - 4), curses.color_pair(4)); row += 1
+        row += 1
+        put(row, 0, "  " + _progress_bar(self._elapsed, dur, w - 4),
+            curses.color_pair(1)); row += 1
+        row += 1
+        div(row); row += 1
+        row += 1
 
-        dur = meta.duration or (track.duration if track else None)
-        if dur:
-            mins, secs = divmod(int(dur), 60)
-            scr.attron(curses.color_pair(1))
-            scr.addstr(y + 4, 4, f"{mins}:{secs:02d}"[:w - 5])
-            scr.attroff(curses.color_pair(1))
+        pl = c.active_playlist
+        if pl and row < h - 4:
+            idx = c._current_index()
+            n = len(pl.tracks)
+            upcoming = [pl.tracks[(idx + i) % n] for i in range(1, min(6, n))]
+            if upcoming:
+                put(row, 0, f"  NEXT UP  ·  Playlist: \"{pl.name}\"",
+                    curses.color_pair(3)); row += 1
+                row += 1
+                col_w = max(10, (w - 6) // 4)
+                hdr = f"  {'Title':<{col_w}}{'Artist':<{col_w}}{'Album':<{col_w}}{'Length':>8}"
+                put(row, 0, _trunc(hdr, w),
+                    curses.color_pair(5) | curses.A_UNDERLINE); row += 1
+                for t in upcoming:
+                    if row >= h - 1:
+                        break
+                    row_str = (
+                        f"  {_trunc(t.title or t.path.stem, col_w - 1):<{col_w}}"
+                        f"{'—':<{col_w}}{'—':<{col_w}}{_fmt_time(t.duration):>8}"
+                    )
+                    put(row, 0, _trunc(row_str, w), curses.color_pair(5)); row += 1
 
-        cfg = c.cfg.web
-        if cfg.enabled:
-            host_display = "localhost" if cfg.host in ("0.0.0.0", "") else cfg.host
-            scr.attron(curses.color_pair(3))
-            scr.addstr(y + 5, 4, f"Web UI → http://{host_display}:{cfg.port}"[:w - 5])
-            scr.attroff(curses.color_pair(3))
+        scr.refresh()
 
-    def _draw_playlists(self, scr: curses.window, w: int, y_start: int, max_rows: int):
+    # ------------------------------------------------------------------ #
+    #  Windows plain-terminal backend                                      #
+    # ------------------------------------------------------------------ #
+
+    def _run_windows(self):
+        import msvcrt
+
+        threading.Thread(target=self._windows_refresh_loop, daemon=True).start()
+
+        while self._running:
+            if msvcrt.kbhit():
+                ch = msvcrt.getwch()
+                if not _handle_key(ch, self.controller):
+                    self._running = False
+                    break
+            time.sleep(0.05)
+
+    def _windows_refresh_loop(self):
+        while self._running:
+            try:
+                self._update_elapsed()
+                self._windows_draw()
+            except Exception as e:
+                log.debug(f"TUI render error: {e}")
+            time.sleep(0.5)
+
+    def _windows_draw(self):
         c = self.controller
-        names = list(c.playlists.keys())
-        active_name = c.active_playlist.name if c.active_playlist else None
+        w = _cols()
+        meta = c.current_meta
+        track = c.current_track
+        state = c.state
 
-        scr.attron(curses.color_pair(5) | curses.A_UNDERLINE)
-        scr.addstr(y_start, 2, "Playlists"[:w - 3])
-        scr.attroff(curses.color_pair(5) | curses.A_UNDERLINE)
+        title  = meta.title  or (track.path.stem if track else "—")
+        artist = meta.artist or "—"
+        album  = meta.album  or "—"
+        year   = f" ({meta.year})" if meta.year else ""
+        dur    = meta.duration or (track.duration if track else None)
+        codec  = track.path.suffix.lstrip(".").upper() if track else ""
 
-        if not names:
-            scr.addstr(y_start + 1, 4, "No playlists found — add files to Managed/Playlists/"[:w - 5])
-            return
+        state_label = {
+            State.PLAYING: "▶  PLAYING",
+            State.PAUSED:  "⏸  PAUSED",
+            State.STOPPED: "⏹  STOPPED",
+        }.get(state, "")
+        shuffle_str = "  [SHUFFLE ON]" if c._shuffle else ""
+        web_str = ""
+        if c.cfg.web.enabled:
+            host = "localhost" if c.cfg.web.host in ("0.0.0.0", "") else c.cfg.web.host
+            web_str = f"  │  http://{host}:{c.cfg.web.port}"
 
-        visible_start = max(0, self._selected - max_rows + 2)
-        for i, name in enumerate(names[visible_start:visible_start + max_rows]):
-            actual = i + visible_start
-            row = y_start + 1 + i
-            pl = c.playlists[name]
-            is_active = name == active_name
-            is_selected = actual == self._selected
+        div = DIV * w
+        lines = [
+            "",
+            div,
+            f"  HAZE PLAYOUT  ·  {state_label}{shuffle_str}{web_str}",
+            div,
+            "  " + HELP,
+            div,
+            "",
+            "  NOW PLAYING",
+            "",
+            _rjust_pair(f"  {_trunc(title, w - 12)}", f"{codec}  ", w),
+            f"  {_trunc(artist, w - 4)}",
+            f"  {_trunc(album + year, w - 4)}",
+            "",
+            "  " + _progress_bar(self._elapsed, dur, w - 4),
+            "",
+            div,
+            "",
+        ]
 
-            prefix = "▶ " if is_active else "  "
-            label = f"{prefix}{name}  ({len(pl)} tracks, {pl.transition})"
+        pl = c.active_playlist
+        if pl:
+            idx = c._current_index()
+            n = len(pl.tracks)
+            upcoming = [pl.tracks[(idx + i) % n] for i in range(1, min(6, n))]
+            if upcoming:
+                col_w = max(10, (w - 6) // 4)
+                lines.append(f"  NEXT UP  ·  Playlist: \"{pl.name}\"")
+                lines.append("")
+                lines.append(_trunc(
+                    f"  {'Title':<{col_w}}{'Artist':<{col_w}}{'Album':<{col_w}}{'Length':>8}", w))
+                lines.append("  " + DIV * (w - 2))
+                for t in upcoming:
+                    lines.append(_trunc(
+                        f"  {_trunc(t.title or t.path.stem, col_w-1):<{col_w}}"
+                        f"{'—':<{col_w}}{'—':<{col_w}}{_fmt_time(t.duration):>8}", w))
+                lines.append("")
+                lines.append(div)
 
-            if is_active and is_selected:
-                attr = curses.color_pair(6) | curses.A_BOLD
-            elif is_active:
-                attr = curses.color_pair(2) | curses.A_BOLD
-            elif is_selected:
-                attr = curses.color_pair(6)
-            else:
-                attr = curses.color_pair(5)
-
-            scr.attron(attr)
-            scr.addstr(row, 2, label[:w - 3])
-            scr.attroff(attr)
-
-    def _draw_keybindings(self, scr: curses.window, w: int, h: int):
-        y = h - len(KEYBINDINGS) - 1
-        scr.attron(curses.color_pair(5) | curses.A_UNDERLINE)
-        scr.addstr(y, 2, "Keys"[:w - 3])
-        scr.attroff(curses.color_pair(5) | curses.A_UNDERLINE)
-        for i, (key, desc) in enumerate(KEYBINDINGS):
-            scr.attron(curses.color_pair(1))
-            scr.addstr(y + 1 + i, 4, f"{key:<10}"[:10])
-            scr.attroff(curses.color_pair(1))
-            scr.addstr(y + 1 + i, 14, desc[:w - 15])
+        os.system("cls")
+        print("\n".join(lines), flush=True)

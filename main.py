@@ -21,6 +21,9 @@ def main():
     controller = Controller(cfg)
     controller.load_playlists()
 
+    tui = TUI(controller)
+    controller.set_tui(tui)
+
     if cfg.web.enabled:
         webserver = WebServer(controller, host=cfg.web.host, port=cfg.web.port)
         controller.set_webserver(webserver)
@@ -29,7 +32,7 @@ def main():
     controller.start()
 
     try:
-        TUI(controller).run()
+        tui.run()
     except KeyboardInterrupt:
         pass
     finally:
