@@ -47,7 +47,6 @@ class Controller:
         self._stop_decode = threading.Event()
         self._pause_event = threading.Event()
         self._pause_event.set()
-        self._track_end_event = threading.Event()
 
         self._decode_thread: Optional[threading.Thread] = None
         self._ffmpeg_udp: Optional[subprocess.Popen] = None
@@ -89,8 +88,7 @@ class Controller:
         self._stop_decode.set()
         self._pause_event.set()
         if self._decode_thread and self._decode_thread.is_alive():
-            if threading.current_thread() is not self._decode_thread:
-                self._decode_thread.join(timeout=1)
+            self._decode_thread.join(timeout=1)
         self._stop_outputs()
         self.state = State.STOPPED
 
@@ -188,16 +186,29 @@ class Controller:
             self._track_index = (self._track_index - 1) % len(self.active_playlist.tracks)
 
     def _play_current(self):
+        """Kills existing decoder and starts a new one for the current track."""
         if not self.active_playlist or not self.active_playlist.tracks:
             return
 
-        if self._shuffle and not self._deck:
-            self._rebuild_deck()
+        # 1. Kill the current decoding thread first to stop it from filling the queue
+        self._stop_decode.set()
+        self._pause_event.set() # Wake it up if paused so it can exit
+        if self._decode_thread and self._decode_thread.is_alive():
+            if threading.current_thread() is not self._decode_thread:
+                self._decode_thread.join(timeout=1.0)
+
+        # 2. Flush the queue entirely so old audio is purged
+        while not self._audio_queue.empty():
+            try:
+                self._audio_queue.get_nowait()
+            except queue.Empty:
+                break
 
         track = self.current_track
         if not track:
             return
 
+        # Metadata updates
         self.current_meta = read_metadata(track.path)
         if self.current_meta.title: track.title = self.current_meta.title
         if self.current_meta.duration: track.duration = self.current_meta.duration
@@ -220,19 +231,8 @@ class Controller:
         if self._tui and hasattr(self._tui, "notify_track_start"):
             self._tui.notify_track_start()
 
-        self._stop_decode.set()
-        if self._decode_thread and self._decode_thread.is_alive():
-            if threading.current_thread() is not self._decode_thread:
-                self._decode_thread.join(timeout=1)
-
-        while not self._audio_queue.empty():
-            try:
-                self._audio_queue.get_nowait()
-            except queue.Empty:
-                break
-
+        # 3. Start new thread
         self._stop_decode.clear()
-        self._track_end_event.clear()
         self.state = State.PLAYING
 
         self._decode_thread = threading.Thread(
@@ -269,35 +269,42 @@ class Controller:
                     break
                 
                 chunk = proc.stdout.read(chunk_size)
-                if not chunk:
+                if not chunk: # End of file reached
                     break
                 
                 try:
+                    # Short timeout so we don't hang if the system is stopping
                     self._audio_queue.put(chunk, timeout=0.5)
                     self.elapsed_seconds += frame_duration
                 except queue.Full:
-                    if self._stop_decode.is_set():
-                        break
+                    continue
             
-            while not self._audio_queue.empty() and not self._stop_decode.is_set():
-                time.sleep(0.05)
+            # Wait for queue to drain only if we are NOT skipping/stopping
+            if not self._stop_decode.is_set():
+                while not self._audio_queue.empty() and not self._stop_decode.is_set():
+                    time.sleep(0.1)
 
         finally:
             proc.kill()
             proc.wait()
 
+        # Only trigger next track if we weren't manually interrupted
         if not self._stop_decode.is_set():
             self._on_track_end()
 
     def _on_track_end(self):
+        # Use a timer or a thread to avoid recursion issues with the lock
+        threading.Thread(target=self._next_internal, daemon=True).start()
+
+    def _next_internal(self):
         with self._lock:
             if self._pending_playlist is not None:
                 pl = self._pending_playlist
                 self._pending_playlist = None
                 self._activate(pl)
-                return
-            self._advance()
-            self._play_current()
+            else:
+                self._advance()
+                self._play_current()
 
     def _start_outputs(self):
         if self.cfg.soundcard.enabled: self._start_soundcard()
@@ -355,12 +362,12 @@ class Controller:
     def _udp_feed_loop(self):
         while True:
             try:
-                chunk = self._audio_queue.get(timeout=0.2)
+                # Use a timeout so the thread can check if it needs to die
+                chunk = self._audio_queue.get(timeout=1.0)
                 if self._ffmpeg_udp and self._ffmpeg_udp.stdin:
                     self._ffmpeg_udp.stdin.write(chunk)
                     self._ffmpeg_udp.stdin.flush()
             except (queue.Empty, BrokenPipeError):
-                if self._stop_decode.is_set(): break
                 continue
 
     def _stop_outputs(self):
