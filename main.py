@@ -1,4 +1,5 @@
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -17,6 +18,10 @@ logging.basicConfig(
 def main():
     config_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("config.yaml")
     cfg = load(config_path)
+
+    if not os.path.exists('Managed') and not os.path.exists('Playlists'):
+        logging.warning("Neither 'Managed' nor 'Playlists' directories exist. Creating 'Managed'.")
+        os.makedirs('Managed', exist_ok=True)
 
     controller = Controller(cfg)
     controller.load_playlists()
