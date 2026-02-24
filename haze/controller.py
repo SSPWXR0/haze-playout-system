@@ -4,6 +4,7 @@ import logging
 import queue
 import subprocess
 import threading
+import time
 from datetime import datetime
 from enum import Enum, auto
 from pathlib import Path
@@ -20,14 +21,12 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-CHUNK_FRAMES = 4096
-
+CHUNK_FRAMES = 2048
 
 class State(Enum):
     STOPPED = auto()
     PLAYING = auto()
     PAUSED = auto()
-
 
 class Controller:
     def __init__(self, cfg: HazeConfig):
@@ -41,8 +40,10 @@ class Controller:
         self._shuffle: bool = cfg.playout.shuffle
         self._deck: Optional[ShuffleDeck] = None
         self.current_meta: TrackMetadata = TrackMetadata()
+        
+        self.elapsed_seconds: float = 0.0
 
-        self._audio_queue: queue.Queue[Optional[bytes]] = queue.Queue(maxsize=32)
+        self._audio_queue: queue.Queue[Optional[bytes]] = queue.Queue(maxsize=12)
         self._stop_decode = threading.Event()
         self._pause_event = threading.Event()
         self._pause_event.set()
@@ -59,12 +60,17 @@ class Controller:
 
         self._lock = threading.Lock()
 
+    @property
+    def current_track(self) -> Optional[Track]:
+        if not self.active_playlist or not self.active_playlist.tracks:
+            return None
+        return self.active_playlist.tracks[self._current_index()]
+
     def set_webserver(self, ws: WebServer):
         self._webserver = ws
 
     def set_tui(self, tui: object):
         self._tui = tui
-
 
     def load_playlists(self):
         self.playlists = discover(self.cfg)
@@ -73,7 +79,6 @@ class Controller:
     def start(self):
         self._start_outputs()
         self.state = State.STOPPED
-
         default = self.cfg.playout.default_playlist
         if default and default in self.playlists:
             self._activate(self.playlists[default])
@@ -83,8 +88,9 @@ class Controller:
     def stop(self):
         self._stop_decode.set()
         self._pause_event.set()
-        if self._decode_thread:
-            self._decode_thread.join(timeout=3)
+        if self._decode_thread and self._decode_thread.is_alive():
+            if threading.current_thread() is not self._decode_thread:
+                self._decode_thread.join(timeout=1)
         self._stop_outputs()
         self.state = State.STOPPED
 
@@ -143,12 +149,6 @@ class Controller:
         if self._webserver:
             self._webserver.broadcast_state_change()
 
-    @property
-    def current_track(self) -> Optional[Track]:
-        if not self.active_playlist or not self.active_playlist.tracks:
-            return None
-        return self.active_playlist.tracks[self._current_index()]
-
     def _current_index(self) -> int:
         if not self.active_playlist:
             return 0
@@ -159,7 +159,6 @@ class Controller:
     def _activate(self, pl: Playlist):
         self.active_playlist = pl
         self._track_index = 0
-        self._deck = None
         self._rebuild_deck()
         self._play_current()
 
@@ -168,11 +167,7 @@ class Controller:
             return
         n = len(self.active_playlist.tracks)
         if self._shuffle:
-            carry = self.cfg.playout.shuffle_carry_over
-            if self._deck is None:
-                self._deck = ShuffleDeck(n, carry_over=carry)
-            else:
-                self._deck.reset(n)
+            self._deck = ShuffleDeck(n, carry_over=self.cfg.playout.shuffle_carry_over)
         else:
             self._deck = None
 
@@ -182,8 +177,7 @@ class Controller:
         if self._shuffle and self._deck:
             self._deck.advance()
         else:
-            n = len(self.active_playlist.tracks)
-            self._track_index = (self._track_index + 1) % n
+            self._track_index = (self._track_index + 1) % len(self.active_playlist.tracks)
 
     def _rewind(self):
         if not self.active_playlist:
@@ -191,21 +185,22 @@ class Controller:
         if self._shuffle and self._deck:
             self._deck.rewind()
         else:
-            n = len(self.active_playlist.tracks)
-            self._track_index = (self._track_index - 1) % n
+            self._track_index = (self._track_index - 1) % len(self.active_playlist.tracks)
 
     def _play_current(self):
         if not self.active_playlist or not self.active_playlist.tracks:
             return
 
-        track = self.active_playlist.tracks[self._current_index()]
+        if self._shuffle and not self._deck:
+            self._rebuild_deck()
+
+        track = self.current_track
+        if not track:
+            return
+
         self.current_meta = read_metadata(track.path)
-
-        if self.current_meta.title:
-            track.title = self.current_meta.title
-        if self.current_meta.duration:
-            track.duration = self.current_meta.duration
-
+        if self.current_meta.title: track.title = self.current_meta.title
+        if self.current_meta.duration: track.duration = self.current_meta.duration
         self.current_meta.save_art()
         self._write_now_playing(track)
 
@@ -216,17 +211,25 @@ class Controller:
                 album=self.current_meta.album or "",
             )
 
+        log.info(f"Playing: {track}")
+        self.elapsed_seconds = 0.0
+
         if self._webserver:
             self._webserver.broadcast_track_change()
 
         if self._tui and hasattr(self._tui, "notify_track_start"):
             self._tui.notify_track_start()
 
-        log.info(f"Playing: {track}")
-
         self._stop_decode.set()
         if self._decode_thread and self._decode_thread.is_alive():
-            self._decode_thread.join(timeout=3)
+            if threading.current_thread() is not self._decode_thread:
+                self._decode_thread.join(timeout=1)
+
+        while not self._audio_queue.empty():
+            try:
+                self._audio_queue.get_nowait()
+            except queue.Empty:
+                break
 
         self._stop_decode.clear()
         self._track_end_event.clear()
@@ -239,31 +242,16 @@ class Controller:
         )
         self._decode_thread.start()
 
-    def _write_now_playing(self, track: Track):
-        try:
-            meta = self.current_meta
-            pl_name = self.active_playlist.name if self.active_playlist else ""
-            lines = [
-                f"title={meta.title or track.path.stem}",
-                f"artist={meta.artist or ''}",
-                f"album={meta.album or ''}",
-                f"year={meta.year or ''}",
-                f"duration={meta.duration or ''}",
-                f"playlist={pl_name}",
-                f"file={track.path}",
-                f"timestamp={datetime.now().isoformat()}",
-            ]
-            Path("now_playing.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
-        except Exception as e:
-            log.debug(f"now_playing.txt write error: {e}")
-
     def _decode_loop(self, path: Path):
         bytes_per_sample = self.cfg.playout.channels * 2
         chunk_size = CHUNK_FRAMES * bytes_per_sample
+        frame_duration = CHUNK_FRAMES / self.cfg.playout.sample_rate
 
         proc = subprocess.Popen(
             [
                 "ffmpeg", "-loglevel", "error",
+                "-probesize", "32",
+                "-analyzeduration", "0",
                 "-i", str(path),
                 "-f", "s16le",
                 "-ar", str(self.cfg.playout.sample_rate),
@@ -279,19 +267,24 @@ class Controller:
                 self._pause_event.wait()
                 if self._stop_decode.is_set():
                     break
+                
                 chunk = proc.stdout.read(chunk_size)
                 if not chunk:
                     break
+                
                 try:
-                    self._audio_queue.put(chunk, timeout=1.0)
+                    self._audio_queue.put(chunk, timeout=0.5)
+                    self.elapsed_seconds += frame_duration
                 except queue.Full:
                     if self._stop_decode.is_set():
                         break
+            
+            while not self._audio_queue.empty() and not self._stop_decode.is_set():
+                time.sleep(0.05)
+
         finally:
             proc.kill()
             proc.wait()
-
-        self._track_end_event.set()
 
         if not self._stop_decode.is_set():
             self._on_track_end()
@@ -307,112 +300,81 @@ class Controller:
             self._play_current()
 
     def _start_outputs(self):
-        if self.cfg.soundcard.enabled:
-            self._start_soundcard()
-        if self.cfg.udp.enabled:
-            self._start_udp()
+        if self.cfg.soundcard.enabled: self._start_soundcard()
+        if self.cfg.udp.enabled: self._start_udp()
 
     def _start_soundcard(self):
         try:
             import sounddevice as sd
             import numpy as np
-
             sr = self.cfg.playout.sample_rate
             ch = self.cfg.playout.channels
-            q = self._audio_queue
-
+            
             def callback(outdata, frames, time_info, status):
-                needed = frames * ch * 2
                 try:
-                    chunk = q.get_nowait()
-                except queue.Empty:
-                    outdata[:] = np.zeros((frames, ch), dtype=np.float32)
-                    return
-                if chunk is None:
-                    outdata[:] = np.zeros((frames, ch), dtype=np.float32)
-                    return
-                if len(chunk) < needed:
-                    chunk = chunk + b"\x00" * (needed - len(chunk))
-                pcm = np.frombuffer(chunk[:needed], dtype=np.int16)
-                outdata[:] = pcm.reshape(-1, ch).astype(np.float32) / 32768.0
+                    chunk = self._audio_queue.get_nowait()
+                    if len(chunk) < (frames * ch * 2):
+                        chunk = chunk.ljust(frames * ch * 2, b"\x00")
+                    pcm = np.frombuffer(chunk, dtype=np.int16)
+                    outdata[:] = pcm.reshape(-1, ch).astype(np.float32) / 32768.0
+                except (queue.Empty, TypeError):
+                    outdata.fill(0)
 
             self._sd_stream = sd.OutputStream(
-                samplerate=sr,
-                channels=ch,
-                dtype="float32",
+                samplerate=sr, channels=ch, dtype="float32",
                 blocksize=CHUNK_FRAMES,
                 device=self.cfg.soundcard.device,
                 callback=callback,
             )
             self._sd_stream.start()
-            log.info("Soundcard output started")
-
-        except ImportError:
-            log.warning("sounddevice not installed — soundcard output disabled")
+            log.info("Soundcard output active.")
         except Exception as e:
-            log.error(f"Soundcard failed to start: {e}")
+            log.error(f"Soundcard failed: {e}")
 
     def _start_udp(self):
         from .mpegts_meta import MetadataInjector
-
         cfg = self.cfg.udp
         target = f"udp://{cfg.host}:{cfg.port}"
 
         self._ffmpeg_udp = subprocess.Popen(
             [
                 "ffmpeg", "-loglevel", "error",
-                "-f", "s16le",
-                "-ar", str(self.cfg.playout.sample_rate),
-                "-ac", str(self.cfg.playout.channels),
-                "-i", "pipe:0",
-                "-c:a", cfg.codec,
-                "-b:a", cfg.bitrate,
-                "-f", cfg.format,
-                "-flush_packets", "1",
-                target,
+                "-f", "s16le", "-ar", str(self.cfg.playout.sample_rate), "-ac", str(self.cfg.playout.channels),
+                "-i", "pipe:0", "-c:a", cfg.codec, "-b:a", cfg.bitrate, "-f", cfg.format,
+                "-flush_packets", "1", target,
             ],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
 
         if cfg.embed_metadata:
             self._meta_injector = MetadataInjector(self._ffmpeg_udp.stdin)
 
-        self._udp_feed_thread = threading.Thread(
-            target=self._udp_feed_loop, daemon=True
-        )
+        self._udp_feed_thread = threading.Thread(target=self._udp_feed_loop, daemon=True)
         self._udp_feed_thread.start()
-        log.info(f"UDP output started → {target}")
 
     def _udp_feed_loop(self):
         while True:
             try:
-                chunk = self._audio_queue.get(timeout=0.5)
-            except queue.Empty:
-                if not (self._ffmpeg_udp and self._ffmpeg_udp.poll() is None):
-                    break
+                chunk = self._audio_queue.get(timeout=0.2)
+                if self._ffmpeg_udp and self._ffmpeg_udp.stdin:
+                    self._ffmpeg_udp.stdin.write(chunk)
+                    self._ffmpeg_udp.stdin.flush()
+            except (queue.Empty, BrokenPipeError):
+                if self._stop_decode.is_set(): break
                 continue
-            if chunk is None:
-                continue
-            try:
-                self._ffmpeg_udp.stdin.write(chunk)
-                self._ffmpeg_udp.stdin.flush()
-            except BrokenPipeError:
-                log.error("UDP ffmpeg pipe broken")
-                break
 
     def _stop_outputs(self):
         if self._sd_stream:
             self._sd_stream.stop()
             self._sd_stream.close()
             self._sd_stream = None
-
         if self._ffmpeg_udp:
-            try:
-                self._ffmpeg_udp.stdin.close()
-            except Exception:
-                pass
             self._ffmpeg_udp.kill()
-            self._ffmpeg_udp.wait()
             self._ffmpeg_udp = None
+
+    def _write_now_playing(self, track: Track):
+        try:
+            meta = self.current_meta
+            lines = [f"title={meta.title or track.path.stem}", f"artist={meta.artist or ''}", f"timestamp={datetime.now().isoformat()}"]
+            Path("now_playing.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        except Exception: pass

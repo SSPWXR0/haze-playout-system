@@ -14,7 +14,10 @@
     --text-dim: #71717a;
     --accent: #ffffff;
     --bg-glass: rgba(16, 20, 26, 0.85);
-    --border-glass: rgba(255, 255, 255, 0.08);
+    --border-glass: rgba(67, 75, 80, 0.26);
+    --text-title: 32px;
+    --text-artist: 24px;
+    --text-album: 24px;
   }
   
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -31,11 +34,12 @@
     display: inline-flex;
     flex-direction: column;
     width: 500px;
+    height: 240px;
     padding: 20px;
     background: var(--bg-glass);
     backdrop-filter: blur(24px);
     -webkit-backdrop-filter: blur(24px);
-    border: 1px solid var(--border-glass);
+    border: 2px solid var(--border-glass);
     border-radius: 16px;
     box-shadow: 0 20px 40px rgba(0,0,0,0.6);
     opacity: 0;
@@ -70,6 +74,7 @@
     height: 100%;
     object-fit: cover;
     display: block;
+    image-rendering: optimizeQuality;
   }
 
   .info-wrap {
@@ -82,7 +87,7 @@
   }
 
   .track-title {
-    font-size: 24px;
+    font-size: var(--text-title);
     font-weight: 600;
     color: var(--text);
     white-space: nowrap;
@@ -93,7 +98,7 @@
   }
 
   .track-artist {
-    font-size: 20px;
+    font-size: var(--text-artist);
     font-weight: 500;
     color: var(--text-mid);
     white-space: nowrap;
@@ -103,12 +108,11 @@
   }
 
   .track-album {
-    font-size: 20px;
+    font-size: var(--text-album);
     font-weight: 600;
     color: var(--text-dim);
-    white-space: nowrap;
     overflow: hidden;
-    text-overflow: ellipsis;
+    text-overflow: clip;
     margin-top: 4px;
     transition: opacity 0.25s ease;
   }
@@ -118,13 +122,13 @@
   .progress-section {
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 20px;
   }
 
   .timecodes {
     display: flex;
     justify-content: space-between;
-    font-size: 13px;
+    font-size: 20px;
     font-weight: 500;
     color: var(--text-mid);
     font-variant-numeric: tabular-nums;
@@ -142,7 +146,7 @@
     height: 100%;
     background: var(--accent);
     width: 0%;
-    transition: width 0.5s linear;
+    transition: width 0.3s linear; /* Slightly faster transition for smoother feel */
   }
 </style>
 </head>
@@ -174,11 +178,12 @@
 
 <script>
 let progressTimer = null;
-let trackStart = null;
+let serverElapsed = 0; // The truth from the server
+let lastSyncTime = null; // When we last heard from the server
 const socket = io();
 
 function formatTime(seconds) {
-  if (!seconds || isNaN(seconds)) return "0:00";
+  if (!seconds || isNaN(seconds) || seconds < 0) return "0:00";
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
   const s = Math.floor(seconds % 60);
@@ -189,7 +194,9 @@ function formatTime(seconds) {
 }
 
 socket.on("track_change", data => { 
-  trackStart = Date.now(); 
+  // Force reset local tracking on track change
+  serverElapsed = 0;
+  lastSyncTime = Date.now(); 
   crossfade(data); 
 });
 
@@ -216,6 +223,10 @@ function apply(data) {
   const t = data.track || {};
   const isPlaying = data.state === "PLAYING";
   const bugEl = document.getElementById("bug");
+
+  // Synchronize with server's playhead
+  serverElapsed = data.elapsed || 0;
+  lastSyncTime = Date.now();
 
   if (isPlaying) {
     bugEl.classList.add("live");
@@ -245,24 +256,30 @@ function apply(data) {
   stopProgress();
   if (isPlaying) {
     startProgress(t.duration);
+  } else {
+      // Update once even if paused to show correct position
+      updateUI(serverElapsed, t.duration);
   }
 }
 
-function startProgress(dur) {
-  if (!trackStart) trackStart = Date.now();
-  
-  progressTimer = setInterval(() => {
-    const elapsedSecs = (Date.now() - trackStart) / 1000;
-
-    document.getElementById("elapsed").textContent = formatTime(elapsedSecs);
-
-    if (dur && dur > 0) {
-      const percentage = Math.min(100, (elapsedSecs / dur) * 100);
+function updateUI(current, total) {
+    document.getElementById("elapsed").textContent = formatTime(current);
+    if (total && total > 0) {
+      const percentage = Math.min(100, (current / total) * 100);
       document.getElementById("progress-fill").style.width = percentage + "%";
     } else {
       document.getElementById("progress-fill").style.width = "0%";
     }
-  }, 500);
+}
+
+function startProgress(dur) {
+  progressTimer = setInterval(() => {
+    // Current time = Server's last known position + time since that update
+    const drift = (Date.now() - lastSyncTime) / 1000;
+    const currentPos = serverElapsed + drift;
+
+    updateUI(currentPos, dur);
+  }, 200); // 5fps for smooth progress
 }
 
 function stopProgress() { 
