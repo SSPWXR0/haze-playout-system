@@ -190,14 +190,12 @@ class Controller:
         if not self.active_playlist or not self.active_playlist.tracks:
             return
 
-        # 1. Kill the current decoding thread first to stop it from filling the queue
         self._stop_decode.set()
-        self._pause_event.set() # Wake it up if paused so it can exit
+        self._pause_event.set()
         if self._decode_thread and self._decode_thread.is_alive():
             if threading.current_thread() is not self._decode_thread:
                 self._decode_thread.join(timeout=1.0)
 
-        # 2. Flush the queue entirely so old audio is purged
         while not self._audio_queue.empty():
             try:
                 self._audio_queue.get_nowait()
@@ -208,7 +206,6 @@ class Controller:
         if not track:
             return
 
-        # Metadata updates
         self.current_meta = read_metadata(track.path)
         if self.current_meta.title: track.title = self.current_meta.title
         if self.current_meta.duration: track.duration = self.current_meta.duration
@@ -231,7 +228,6 @@ class Controller:
         if self._tui and hasattr(self._tui, "notify_track_start"):
             self._tui.notify_track_start()
 
-        # 3. Start new thread
         self._stop_decode.clear()
         self.state = State.PLAYING
 
@@ -269,17 +265,16 @@ class Controller:
                     break
                 
                 chunk = proc.stdout.read(chunk_size)
-                if not chunk: # End of file reached
+                if not chunk:
                     break
                 
                 try:
-                    # Short timeout so we don't hang if the system is stopping
+
                     self._audio_queue.put(chunk, timeout=0.5)
                     self.elapsed_seconds += frame_duration
                 except queue.Full:
                     continue
-            
-            # Wait for queue to drain only if we are NOT skipping/stopping
+
             if not self._stop_decode.is_set():
                 while not self._audio_queue.empty() and not self._stop_decode.is_set():
                     time.sleep(0.1)
@@ -288,12 +283,10 @@ class Controller:
             proc.kill()
             proc.wait()
 
-        # Only trigger next track if we weren't manually interrupted
         if not self._stop_decode.is_set():
             self._on_track_end()
 
     def _on_track_end(self):
-        # Use a timer or a thread to avoid recursion issues with the lock
         threading.Thread(target=self._next_internal, daemon=True).start()
 
     def _next_internal(self):
@@ -362,7 +355,6 @@ class Controller:
     def _udp_feed_loop(self):
         while True:
             try:
-                # Use a timeout so the thread can check if it needs to die
                 chunk = self._audio_queue.get(timeout=1.0)
                 if self._ffmpeg_udp and self._ffmpeg_udp.stdin:
                     self._ffmpeg_udp.stdin.write(chunk)
