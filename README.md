@@ -15,12 +15,20 @@ pip install -r requirements.txt
 python main.py
 ```
 
+### Command‑line options
+
+```
+--config, -c PATH     Use an alternate configuration file (defaults to `config.yaml`)
+--list-devices        Print available audio output devices and exit
+--list-playlists      Show discovered playlist names and exit
+--no-tui              Run headless without the terminal user interface (control via logs or web UI)
+```
+
 Or point at a custom config:
 
 ```
 python main.py /path/to/config.yaml
 ```
-
 ## Playlist Discovery
 
 Drop content into `Managed/Playlists/`:
@@ -43,13 +51,6 @@ playout:
   shuffle: false
 
 outputs:
-  udp:
-    enabled: false
-    host: "127.0.0.1"
-    port: 1234
-    bitrate: "192k"
-    codec: aac
-    format: mpegts
   soundcard:
     enabled: true
     device: null                  # null = system default
@@ -62,39 +63,16 @@ paths:
   playlists_dir: "Managed/Playlists"
 ```
 
-### Per-Playlist Transition Override
-
-Playlist-level transition config is not yet in a UI — set it programmatically by editing the `Playlist` objects after discovery, or add a sidecar `.yaml` per playlist (future feature).
-
-## TUI Keybindings
-
-| Key | Action |
-|---|---|
-| `SPACE` | Play / Pause |
-| `→` or `n` | Next track |
-| `←` or `p` | Previous track |
-| `↑ / ↓` | Navigate playlist list |
-| `ENTER` | Switch to selected playlist |
-| `s` | Toggle shuffle |
-| `r` | Reload playlists from disk |
-| `q` | Quit |
-
 ## Architecture
 
 ```
 main.py
   └─ PlayoutController      orchestrates playlists + transitions
        ├─ AudioEngine        decodes via ffmpeg, fans out to outputs
-       │    ├─ sounddevice   local audio output
-       │    └─ ffmpeg UDP    AAC/MPEG-TS over UDP
+       │    └─ sounddevice   local audio output
        └─ TUI (curses)       operator interface
 ```
 
-## Receiving the UDP Stream
-
-```bash
-ffplay -f mpegts udp://127.0.0.1:1234
-```
 
 ## Logs
 

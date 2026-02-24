@@ -17,7 +17,6 @@ from .shuffle import ShuffleDeck
 
 if TYPE_CHECKING:
     from .webserver import WebServer
-    from .mpegts_meta import MetadataInjector
 
 log = logging.getLogger(__name__)
 
@@ -49,12 +48,9 @@ class Controller:
         self._pause_event.set()
 
         self._decode_thread: Optional[threading.Thread] = None
-        self._ffmpeg_udp: Optional[subprocess.Popen] = None
         self._sd_stream = None
-        self._udp_feed_thread: Optional[threading.Thread] = None
 
         self._webserver: Optional[WebServer] = None
-        self._meta_injector: Optional[MetadataInjector] = None
         self._tui: Optional[object] = None
 
         self._lock = threading.Lock()
@@ -212,12 +208,6 @@ class Controller:
         self.current_meta.save_art()
         self._write_now_playing(track)
 
-        if self._meta_injector:
-            self._meta_injector.update(
-                title=self.current_meta.title or track.path.stem,
-                artist=self.current_meta.artist or "",
-                album=self.current_meta.album or "",
-            )
 
         log.info(f"Playing: {track}")
         self.elapsed_seconds = 0.0
@@ -300,8 +290,8 @@ class Controller:
                 self._play_current()
 
     def _start_outputs(self):
-        if self.cfg.soundcard.enabled: self._start_soundcard()
-        if self.cfg.udp.enabled: self._start_udp()
+        if self.cfg.soundcard.enabled:
+            self._start_soundcard()
 
     def _start_soundcard(self):
         try:
@@ -331,45 +321,13 @@ class Controller:
         except Exception as e:
             log.error(f"Soundcard failed: {e}")
 
-    def _start_udp(self):
-        from .mpegts_meta import MetadataInjector
-        cfg = self.cfg.udp
-        target = f"udp://{cfg.host}:{cfg.port}"
 
-        self._ffmpeg_udp = subprocess.Popen(
-            [
-                "ffmpeg", "-loglevel", "error",
-                "-f", "s16le", "-ar", str(self.cfg.playout.sample_rate), "-ac", str(self.cfg.playout.channels),
-                "-i", "pipe:0", "-c:a", cfg.codec, "-b:a", cfg.bitrate, "-f", cfg.format,
-                "-flush_packets", "1", target,
-            ],
-            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-
-        if cfg.embed_metadata:
-            self._meta_injector = MetadataInjector(self._ffmpeg_udp.stdin)
-
-        self._udp_feed_thread = threading.Thread(target=self._udp_feed_loop, daemon=True)
-        self._udp_feed_thread.start()
-
-    def _udp_feed_loop(self):
-        while True:
-            try:
-                chunk = self._audio_queue.get(timeout=1.0)
-                if self._ffmpeg_udp and self._ffmpeg_udp.stdin:
-                    self._ffmpeg_udp.stdin.write(chunk)
-                    self._ffmpeg_udp.stdin.flush()
-            except (queue.Empty, BrokenPipeError):
-                continue
 
     def _stop_outputs(self):
         if self._sd_stream:
             self._sd_stream.stop()
             self._sd_stream.close()
             self._sd_stream = None
-        if self._ffmpeg_udp:
-            self._ffmpeg_udp.kill()
-            self._ffmpeg_udp = None
 
     def _write_now_playing(self, track: Track):
         try:

@@ -7,16 +7,6 @@ from typing import Optional
 import yaml
 
 
-@dataclass
-class OutputUDPConfig:
-    enabled: bool = False
-    host: str = "127.0.0.1"
-    port: int = 1234
-    bitrate: str = "192k"
-    codec: str = "aac"
-    format: str = "mpegts"
-    embed_metadata: bool = True
-
 
 @dataclass
 class OutputSoundcardConfig:
@@ -49,7 +39,6 @@ class WebConfig:
 @dataclass
 class HazeConfig:
     playout: PlayoutConfig = field(default_factory=PlayoutConfig)
-    udp: OutputUDPConfig = field(default_factory=OutputUDPConfig)
     soundcard: OutputSoundcardConfig = field(default_factory=OutputSoundcardConfig)
     transitions: TransitionsConfig = field(default_factory=TransitionsConfig)
     web: WebConfig = field(default_factory=WebConfig)
@@ -63,7 +52,6 @@ def load(path: Path = Path("config.yaml")) -> HazeConfig:
             raw = yaml.safe_load(f) or {}
 
     playout_raw = raw.get("playout", {})
-    udp_raw = raw.get("outputs", {}).get("udp", {})
     sc_raw = raw.get("outputs", {}).get("soundcard", {})
     trans_raw = raw.get("transitions", {})
     web_raw = raw.get("web", {})
@@ -76,15 +64,6 @@ def load(path: Path = Path("config.yaml")) -> HazeConfig:
             default_playlist=playout_raw.get("default_playlist"),
             shuffle=playout_raw.get("shuffle", False),
             shuffle_carry_over=playout_raw.get("shuffle_carry_over", 3),
-        ),
-        udp=OutputUDPConfig(
-            enabled=udp_raw.get("enabled", False),
-            host=udp_raw.get("host", "127.0.0.1"),
-            port=udp_raw.get("port", 1234),
-            bitrate=udp_raw.get("bitrate", "192k"),
-            codec=udp_raw.get("codec", "aac"),
-            format=udp_raw.get("format", "mpegts"),
-            embed_metadata=udp_raw.get("embed_metadata", True),
         ),
         soundcard=OutputSoundcardConfig(
             enabled=sc_raw.get("enabled", True),

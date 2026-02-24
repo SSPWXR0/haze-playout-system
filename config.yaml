@@ -1,3 +1,5 @@
+no_tui: false
+
 playout:
   sample_rate: 48000
   channels: 2
@@ -6,14 +8,6 @@ playout:
   shuffle_carry_over: 3
 
 outputs:
-  udp:
-    enabled: false
-    host: "239.10.50.1"
-    port: 3800
-    bitrate: "192k"
-    codec: aac
-    format: mpegts
-    embed_metadata: true
   soundcard:
     enabled: true
     device: null
